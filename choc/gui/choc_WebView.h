@@ -137,6 +137,11 @@ public:
         /// otherwise wouldn't work by default. This lets you turn that off if you
         /// need to.
         bool enableDefaultClipboardKeyShortcutsInSafari = true;
+
+        /// Called when a top-level navigation completes or fails.
+        /// On failure, errorMessage contains platform-specific details
+        /// (NSError description on macOS, COREWEBVIEW2_WEB_ERROR_STATUS on Windows).
+        std::function<void(bool isSuccess, const std::string& errorMessage)> onNavigationComplete;
     };
 
     /// Creates a WebView with default options.
@@ -821,6 +826,9 @@ private:
         if (objc::call<int> (error, "code") == NSURLErrorCancelled)
             return;
 
+        if (options->onNavigationComplete)
+            options->onNavigationComplete (false, getMessageFromNSError (error));
+
         setHTML (R"xxx(
             <!DOCTYPE html>
             <html>
@@ -975,6 +983,15 @@ private:
                              {
                                  if (auto p = getPimpl (self))
                                      p->onResourceRequested (task);
+                             }),
+                             "v@:@@");
+
+            class_addMethod (delegateClass, sel_registerName ("webView:didFinishNavigation:"),
+                             (IMP) (+[](id self, SEL, id, id)
+                             {
+                                 if (auto p = getPimpl (self))
+                                     if (p->options->onNavigationComplete)
+                                         p->options->onNavigationComplete (true, "");
                              }),
                              "v@:@@");
 
@@ -1162,6 +1179,45 @@ enum COREWEBVIEW2_MOVE_FOCUS_REASON
     COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC = 0,
     COREWEBVIEW2_MOVE_FOCUS_REASON_NEXT         = (COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC + 1),
     COREWEBVIEW2_MOVE_FOCUS_REASON_PREVIOUS     = (COREWEBVIEW2_MOVE_FOCUS_REASON_NEXT + 1)
+};
+
+enum COREWEBVIEW2_WEB_ERROR_STATUS
+{
+    COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN                                 = 0,
+    COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_COMMON_NAME_IS_INCORRECT    = 1,
+    COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_EXPIRED                     = 2,
+    COREWEBVIEW2_WEB_ERROR_STATUS_CLIENT_CERTIFICATE_CONTAINS_ERRORS      = 3,
+    COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_REVOKED                     = 4,
+    COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_IS_INVALID                  = 5,
+    COREWEBVIEW2_WEB_ERROR_STATUS_SERVER_UNREACHABLE                      = 6,
+    COREWEBVIEW2_WEB_ERROR_STATUS_TIMEOUT                                 = 7,
+    COREWEBVIEW2_WEB_ERROR_STATUS_ERROR_HTTP_INVALID_SERVER_RESPONSE      = 8,
+    COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_ABORTED                      = 9,
+    COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_RESET                        = 10,
+    COREWEBVIEW2_WEB_ERROR_STATUS_DISCONNECTED                            = 11,
+    COREWEBVIEW2_WEB_ERROR_STATUS_CANNOT_CONNECT                          = 12,
+    COREWEBVIEW2_WEB_ERROR_STATUS_HOST_NAME_NOT_RESOLVED                  = 13,
+    COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED                      = 14,
+    COREWEBVIEW2_WEB_ERROR_STATUS_REDIRECT_FAILED                         = 15,
+    COREWEBVIEW2_WEB_ERROR_STATUS_UNEXPECTED_ERROR                        = 16,
+    COREWEBVIEW2_WEB_ERROR_STATUS_VALID_AUTHENTICATION_CREDENTIALS_REQUIRED = 17,
+    COREWEBVIEW2_WEB_ERROR_STATUS_VALID_PROXY_AUTHENTICATION_REQUIRED     = 18
+};
+
+MIDL_INTERFACE("30d68b7d-20d9-4752-a9ca-ec8448fbb5c1")
+ICoreWebView2NavigationCompletedEventArgs : public IUnknown
+{
+public:
+    virtual HRESULT STDMETHODCALLTYPE get_IsSuccess(BOOL*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_WebErrorStatus(COREWEBVIEW2_WEB_ERROR_STATUS*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_NavigationId(UINT64*) = 0;
+};
+
+MIDL_INTERFACE("d33a35bf-1c49-4f98-93ab-006e0533fe1c")
+ICoreWebView2NavigationCompletedEventHandler : public IUnknown
+{
+public:
+    virtual HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs*) = 0;
 };
 
 enum COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT {};
@@ -1559,6 +1615,7 @@ private:
 
         EventRegistrationToken token;
         coreWebView->add_WebResourceRequested (eventHandler, std::addressof (token));
+        coreWebView->add_NavigationCompleted (eventHandler, std::addressof (token));
 
         if (options.fetchResource)
             navigate ({});
@@ -1756,7 +1813,8 @@ private:
                            public ICoreWebView2CreateCoreWebView2ControllerCompletedHandler,
                            public ICoreWebView2WebMessageReceivedEventHandler,
                            public ICoreWebView2PermissionRequestedEventHandler,
-                           public ICoreWebView2WebResourceRequestedEventHandler
+                           public ICoreWebView2WebResourceRequestedEventHandler,
+                           public ICoreWebView2NavigationCompletedEventHandler
     {
         EventHandler (Pimpl& p) : ownerPimpl (p), deletionCheckerRef (p.deletionChecker) {}
         EventHandler (const EventHandler&) = delete;
@@ -1829,6 +1887,57 @@ private:
                 return E_FAIL;
 
             return ownerPimpl.onResourceRequested (args);
+        }
+
+        HRESULT STDMETHODCALLTYPE Invoke (ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs* args) override
+        {
+            if (deletionCheckerRef->deleted)
+                return E_FAIL;
+
+            if (ownerPimpl.options.onNavigationComplete)
+            {
+                BOOL success = FALSE;
+                args->get_IsSuccess (std::addressof (success));
+
+                if (success)
+                {
+                    ownerPimpl.options.onNavigationComplete (true, "");
+                }
+                else
+                {
+                    COREWEBVIEW2_WEB_ERROR_STATUS status = COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
+                    args->get_WebErrorStatus (std::addressof (status));
+                    ownerPimpl.options.onNavigationComplete (false, webErrorStatusToString (status));
+                }
+            }
+
+            return S_OK;
+        }
+
+        static std::string webErrorStatusToString (COREWEBVIEW2_WEB_ERROR_STATUS s)
+        {
+            switch (s)
+            {
+                case COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_COMMON_NAME_IS_INCORRECT:     return "CERTIFICATE_COMMON_NAME_IS_INCORRECT";
+                case COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_EXPIRED:                      return "CERTIFICATE_EXPIRED";
+                case COREWEBVIEW2_WEB_ERROR_STATUS_CLIENT_CERTIFICATE_CONTAINS_ERRORS:       return "CLIENT_CERTIFICATE_CONTAINS_ERRORS";
+                case COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_REVOKED:                      return "CERTIFICATE_REVOKED";
+                case COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_IS_INVALID:                   return "CERTIFICATE_IS_INVALID";
+                case COREWEBVIEW2_WEB_ERROR_STATUS_SERVER_UNREACHABLE:                       return "SERVER_UNREACHABLE";
+                case COREWEBVIEW2_WEB_ERROR_STATUS_TIMEOUT:                                  return "TIMEOUT";
+                case COREWEBVIEW2_WEB_ERROR_STATUS_ERROR_HTTP_INVALID_SERVER_RESPONSE:       return "ERROR_HTTP_INVALID_SERVER_RESPONSE";
+                case COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_ABORTED:                       return "CONNECTION_ABORTED";
+                case COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_RESET:                         return "CONNECTION_RESET";
+                case COREWEBVIEW2_WEB_ERROR_STATUS_DISCONNECTED:                             return "DISCONNECTED";
+                case COREWEBVIEW2_WEB_ERROR_STATUS_CANNOT_CONNECT:                           return "CANNOT_CONNECT";
+                case COREWEBVIEW2_WEB_ERROR_STATUS_HOST_NAME_NOT_RESOLVED:                   return "HOST_NAME_NOT_RESOLVED";
+                case COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED:                       return "OPERATION_CANCELED";
+                case COREWEBVIEW2_WEB_ERROR_STATUS_REDIRECT_FAILED:                          return "REDIRECT_FAILED";
+                case COREWEBVIEW2_WEB_ERROR_STATUS_UNEXPECTED_ERROR:                         return "UNEXPECTED_ERROR";
+                case COREWEBVIEW2_WEB_ERROR_STATUS_VALID_AUTHENTICATION_CREDENTIALS_REQUIRED: return "VALID_AUTHENTICATION_CREDENTIALS_REQUIRED";
+                case COREWEBVIEW2_WEB_ERROR_STATUS_VALID_PROXY_AUTHENTICATION_REQUIRED:      return "VALID_PROXY_AUTHENTICATION_REQUIRED";
+                default:                                                                      return "UNKNOWN";
+            }
         }
 
         Pimpl& ownerPimpl;
