@@ -2,15 +2,15 @@ cmake_minimum_required(VERSION 3.16)
 
 project(choc_tests)
 
-add_executable(choc_tests main.cpp main2.cpp)
+add_executable(choc_tests choc_tests.cpp)
 
 # To test V8, there needs to be a suitable folder somewhere with a build
-# set(V8_LOCATION "/Users/jules/code/v8")
+# set(V8_LOCATION "/path_to_your_v8_folder/v8")
 # set(V8_BUILD_NAME "arm64.release")
 
 # To test the HTTP server, you'll need boost beast and its dependencies, in a
 # folder at this location:
-# set(BOOST_LOCATION "/Users/jules/code/cmajor-dev/cmajor/3rdParty/boost")
+# set(BOOST_LOCATION "/path_to_your_boost_installation/boost")
 
 target_compile_features(choc_tests PRIVATE cxx_std_20)
 
@@ -19,7 +19,7 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR
 
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
     set(CMAKE_CXX_FLAGS_DEBUG   "${CMAKE_CXX_FLAGS_DEBUG} -O0 -DDEBUG")
-    set(CMAKE_CXX_FLAGS         "${CMAKE_CXX_FLAGS} -Werror -Wall -Wextra -Wshadow -Wno-missing-field-initializers -Wstrict-aliasing -Wuninitialized -Wunused-parameter -Wconversion -Wsign-compare -Wreorder -Wsign-conversion -Wno-ignored-qualifiers -Wunreachable-code -Wdeprecated-copy -Wdeprecated-copy-dtor ")
+    set(CMAKE_CXX_FLAGS         "${CMAKE_CXX_FLAGS} -Werror -Wall -Wextra -Wshadow -Wno-missing-field-initializers -Wstrict-aliasing -Wuninitialized -Wunused-parameter -Wconversion -Wsign-compare -Wreorder -Wsign-conversion -Wno-ignored-qualifiers -Wunreachable-code -Wdeprecated-copy -Wdeprecated-copy-dtor -Wpedantic ")
     set(CMAKE_C_FLAGS           "${CMAKE_C_FLAGS} -Wno-unused-result")
 
     if (${CMAKE_SYSTEM_NAME} MATCHES "Linux")
@@ -28,13 +28,14 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR
 
     # Enable additional Clang warnings
     if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wint-conversion -Woverloaded-virtual -Wshorten-64-to-32 -Wconditional-uninitialized -Wconstant-conversion -Wunused-private-field -Wbool-conversion -Wextra-semi -Wshadow-uncaptured-local")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wint-conversion -Woverloaded-virtual -Wshorten-64-to-32 -Wconditional-uninitialized -Wconstant-conversion -Wunused-private-field -Wbool-conversion -Wextra-semi -Wshadow-uncaptured-local -Wdeprecated-declarations -Wdangling-assignment-gsl")
 
         # V8 screws up the sanitizer...
         if (DEFINED V8_LOCATION)
             set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DCHOC_V8_AVAILABLE=1 -DV8_COMPRESS_POINTERS=1 -DV8_ENABLE_SANDBOX=1")
         else()
             set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=undefined")
+            target_link_libraries(choc_tests PRIVATE "-fsanitize=undefined")
         endif()
     endif()
 
@@ -70,13 +71,16 @@ elseif (CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
 
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHsc /W4 /WX -DWIN32 /bigobj ")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHsc /W4 /WX /w14355 -DWIN32 /bigobj ")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
 endif()
 
 # On OSX, need to add the WebKit framework for WebView functionality
 if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
-    target_link_libraries(choc_tests "-framework WebKit -framework CoreServices")
+    target_link_libraries(choc_tests PRIVATE "-framework WebKit")
+    target_link_libraries(choc_tests PRIVATE "-framework CoreServices")
+    target_link_libraries(choc_tests PRIVATE "-framework CoreAudio")
+    target_link_libraries(choc_tests PRIVATE "-framework CoreMIDI")
 
     if (DEFINED V8_LOCATION)
         target_include_directories(choc_tests PRIVATE "${V8_LOCATION}/v8/include")
@@ -89,8 +93,10 @@ endif()
 if (${CMAKE_SYSTEM_NAME} MATCHES "Linux")
     find_package(PkgConfig REQUIRED)
     pkg_check_modules (gtk3 REQUIRED gtk+-3.0 IMPORTED_TARGET)
-    pkg_check_modules (webkit2 REQUIRED webkit2gtk-4.0 IMPORTED_TARGET)
-    target_link_libraries (choc_tests PUBLIC pthread PkgConfig::gtk3 PkgConfig::webkit2)
+    pkg_check_modules (webkit2 REQUIRED webkit2gtk-4.1 IMPORTED_TARGET)
+    pkg_check_modules (alsa REQUIRED alsa IMPORTED_TARGET)
+    pkg_check_modules (jack REQUIRED jack IMPORTED_TARGET)
+    target_link_libraries (choc_tests PUBLIC pthread PkgConfig::gtk3 PkgConfig::webkit2 PkgConfig::alsa PkgConfig::jack)
 endif()
 
 if (DEFINED BOOST_LOCATION)
