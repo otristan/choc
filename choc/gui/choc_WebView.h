@@ -556,6 +556,12 @@ struct choc::ui::WebView::Pimpl
         if (options->fetchResource)
             call<void> (config, "setURLSchemeHandler:forURLScheme:", delegate, getNSString (getURIScheme (*options)));
 
+        // applicationNameForUserAgent is a WKWebViewConfiguration property (it appends to
+        // the default UA), so it must be set on the config before the view is created.
+        // customUserAgent (below) replaces the UA entirely and takes precedence.
+        if (options->customUserAgent.empty() && ! options->userAgentSuffix.empty())
+            call<void> (config, "setApplicationNameForUserAgent:", getNSString (options->userAgentSuffix));
+
         webview = call<id> (allocateWebview(), "initWithFrame:configuration:", objc::CGRect(), config);
 
         if (! webview)
@@ -565,8 +571,6 @@ struct choc::ui::WebView::Pimpl
 
         if (! options->customUserAgent.empty())
             call<void> (webview, "setValue:forKey:", getNSString (options->customUserAgent), getNSString ("customUserAgent"));
-        else if (! options->userAgentSuffix.empty())
-            call<void> (webview, "setApplicationNameForUserAgent:", getNSString (options->userAgentSuffix));
 
         call<void> (webview, "setUIDelegate:", delegate);
         call<void> (webview, "setNavigationDelegate:", delegate);
