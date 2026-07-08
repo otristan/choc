@@ -85,6 +85,14 @@ public:
         // this empty for default behaviour.
         std::string customUserAgent;
 
+        /// Optional string to append (space-separated) to the browser's *default*
+        /// user-agent, instead of replacing it like customUserAgent does. This keeps the
+        /// native engine tokens (e.g. AppleWebKit) that some sites rely on to select
+        /// their code path, while still letting you add an app identifier. If
+        /// customUserAgent is also set, that one wins and this is ignored. Leave empty
+        /// for default behaviour.
+        std::string userAgentSuffix;
+
         /// On some platforms (e.g. Windows) a newly constructed WebView can't do
         /// anything until the message loop has dispatched a few messages doing setup
         /// work - so you should use this callback to be told when that has happened.
@@ -294,6 +302,9 @@ struct choc::ui::WebView::Pimpl
 
         if (! options.customUserAgent.empty())
             webkit_settings_set_user_agent (settings, options.customUserAgent.c_str());
+        else if (! options.userAgentSuffix.empty())
+            if (const gchar* defaultAgent = webkit_settings_get_user_agent (settings))
+                webkit_settings_set_user_agent (settings, (std::string (defaultAgent) + " " + options.userAgentSuffix).c_str());
 
         if (options.fetchResource)
         {
@@ -554,6 +565,8 @@ struct choc::ui::WebView::Pimpl
 
         if (! options->customUserAgent.empty())
             call<void> (webview, "setValue:forKey:", getNSString (options->customUserAgent), getNSString ("customUserAgent"));
+        else if (! options->userAgentSuffix.empty())
+            call<void> (webview, "setApplicationNameForUserAgent:", getNSString (options->userAgentSuffix));
 
         call<void> (webview, "setUIDelegate:", delegate);
         call<void> (webview, "setNavigationDelegate:", delegate);
@@ -1627,15 +1640,32 @@ private:
         {
             settings->put_AreDevToolsEnabled (options.enableDebugMode);
 
-            if (! options.customUserAgent.empty())
+            if (! options.customUserAgent.empty() || ! options.userAgentSuffix.empty())
             {
                 COMPtr<ICoreWebView2Settings2> settings2;
 
                 if (settings->QueryInterface (ICoreWebView2Settings2::getIID(), (void**) settings2.getAddress()) == S_OK
                         && settings2 != nullptr)
                 {
-                    auto agent = createUTF16StringFromUTF8 (options.customUserAgent);
-                    settings2->put_UserAgent (agent.c_str());
+                    if (! options.customUserAgent.empty())
+                    {
+                        auto agent = createUTF16StringFromUTF8 (options.customUserAgent);
+                        settings2->put_UserAgent (agent.c_str());
+                    }
+                    else
+                    {
+                        // append to the default UA rather than replacing it
+                        LPWSTR currentAgent = {};
+
+                        if (settings2->get_UserAgent (std::addressof (currentAgent)) == S_OK && currentAgent != nullptr)
+                        {
+                            std::wstring agent = currentAgent;
+                            CoTaskMemFree (currentAgent);
+                            agent += L" ";
+                            agent += createUTF16StringFromUTF8 (options.userAgentSuffix);
+                            settings2->put_UserAgent (agent.c_str());
+                        }
+                    }
                 }
             }
         }
