@@ -76,6 +76,7 @@
 #include "../choc/javascript/choc_javascript.h"
 #include "../choc/javascript/choc_javascript_Timer.h"
 #include "../choc/javascript/choc_javascript_Console.h"
+#include "../choc/containers/choc_ArgumentList.h"
 
 #if CHOC_ENABLE_HTTP_SERVER_TEST
  #include "../choc/network/choc_HTTPServer.h"
@@ -550,6 +551,51 @@ inline void testStringUtilities (choc::test::TestProgress& progress)
         CHOC_EXPECT_TRUE (p.find ("ine4").findStartOfLine (p).startsWith ("line4"));
 
         CHOC_EXPECT_EQ (0x12345u, choc::text::createUnicodeFromHighAndLowSurrogates (choc::text::splitCodePointIntoSurrogatePair (0x12345u)));
+    }
+
+    {
+        CHOC_TEST (UTF8TruncatedSequences)
+
+        // Each sequence is cut short by the null terminator, which is followed by bytes
+        // that aren't part of the string and must never be read.
+        for (auto truncated : { "\xc3", "\xe2", "\xe2\x82", "\xf0", "\xf0\x9f", "\xf0\x9f\x98" })
+        {
+            auto buffer = std::string ("a") + truncated + std::string ("\0ZZ", 3);
+            choc::text::UTF8Pointer p (buffer.c_str());
+
+            CHOC_EXPECT_EQ (2u, p.length());
+
+            std::vector<choc::text::UnicodeChar> chars;
+
+            for (auto c : p)
+                chars.push_back (c);
+
+            CHOC_EXPECT_TRUE ((chars == std::vector<choc::text::UnicodeChar> { 'a', 0xfffd }));
+            CHOC_EXPECT_EQ (std::string ("a\\ufffd"), choc::json::addEscapeCharacters (p));
+            CHOC_EXPECT_TRUE (p.find ("ZZ").empty());
+            CHOC_EXPECT_TRUE (p.findEndOfLine().empty());
+        }
+
+        // A truncated sequence mid-string mustn't swallow the character that follows it
+        {
+            choc::text::UTF8Pointer p ("\xe2\x82" "b\xc0" "c");
+            CHOC_EXPECT_EQ (4u, p.length());
+            CHOC_EXPECT_EQ (0xfffdu, p.popFirstChar());
+            CHOC_EXPECT_EQ ((choc::text::UnicodeChar) 'b', p.popFirstChar());
+            CHOC_EXPECT_EQ (0xfffdu, p.popFirstChar());
+            CHOC_EXPECT_EQ ((choc::text::UnicodeChar) 'c', p.popFirstChar());
+            CHOC_EXPECT_TRUE (p.empty());
+        }
+
+        // Valid multi-byte sequences are unaffected
+        {
+            choc::text::UTF8Pointer p ("\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80");
+            CHOC_EXPECT_EQ (3u, p.length());
+            CHOC_EXPECT_EQ (0xe9u, p.popFirstChar());
+            CHOC_EXPECT_EQ (0x20acu, p.popFirstChar());
+            CHOC_EXPECT_EQ (0x1f600u, p.popFirstChar());
+            CHOC_EXPECT_TRUE (p.empty());
+        }
     }
 
     {
@@ -1384,6 +1430,190 @@ inline void testMIDI (choc::test::TestProgress& progress)
 }
 
 //==============================================================================
+inline void testArgumentList (choc::test::TestProgress& progress)
+{
+    CHOC_CATEGORY (ArgumentList);
+
+    {
+        CHOC_TEST (ArgcvParsingDoubleDash)
+
+        const char* argv[] = { "executableName", "other1", "--flag1", "other2", "--param1=foo", "--flag2", "--param2=bar", "--param3=42", "other3" };
+
+        choc::ArgumentList args (9, argv);
+
+        CHOC_EXPECT_TRUE (args.contains ("--flag1"));
+        CHOC_EXPECT_TRUE (args.contains ("--param1"));
+        CHOC_EXPECT_TRUE (args.contains ("--flag2"));
+        CHOC_EXPECT_TRUE (args.contains ("--param2"));
+        CHOC_EXPECT_TRUE (args.contains ("--param3"));
+        CHOC_EXPECT_FALSE (args.contains ("--flag3"));
+
+        CHOC_EXPECT_EQ (args.indexOf ("other1"), 0);
+        CHOC_EXPECT_EQ (args.indexOf ("--flag1"), 1);
+        CHOC_EXPECT_EQ (args.indexOf ("--param1"), 3);
+        CHOC_EXPECT_EQ (args.indexOf ("--flag2"), 4);
+        CHOC_EXPECT_EQ (args.indexOf ("--param2"), 5);
+        CHOC_EXPECT_EQ (args.indexOf ("--param3"), 6);
+        CHOC_EXPECT_EQ (args.indexOf ("--flag3"), -1);
+
+        CHOC_EXPECT_EQ (args.getValueFor ("--param1", false).value(), "foo");
+        CHOC_EXPECT_EQ (args.getValueFor ("--param2", false).value(), "bar");
+        CHOC_EXPECT_EQ (args.getValueFor ("--param3", false).value(), "42");
+
+        CHOC_EXPECT_TRUE (args.removeIfFound ("--flag1"));
+        CHOC_EXPECT_TRUE (args.removeIfFound ("--param1"));
+
+        CHOC_EXPECT_FALSE (args.getValueFor ("--param1", false).has_value());
+        CHOC_EXPECT_EQ (args.getValueFor ("--param2", false).value(), "bar");
+        CHOC_EXPECT_EQ (args.getValueFor ("--param3", false).value(), "42");
+
+        CHOC_EXPECT_EQ (args.removeValueFor ("--param2", "default"), "bar");
+        CHOC_EXPECT_EQ (args.removeValueFor ("--param2", "default"), "default");
+        CHOC_EXPECT_FALSE (args.removeValueFor ("--param2").has_value());
+        CHOC_EXPECT_FALSE (args.getValueFor ("--param2", false).has_value());
+
+        CHOC_EXPECT_EQ (args.removeIntValue<int> ("--param3", 101), 42);
+        CHOC_EXPECT_EQ (args.removeIntValue<int> ("--param3", 101), 101);
+
+        CHOC_EXPECT_EQ (args.indexOf ("--flag1"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("--param1"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("--flag2"), 2);
+        CHOC_EXPECT_EQ (args.indexOf ("--param2"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("--flag3"), -1);
+
+        args.removeIndex (2);
+
+        CHOC_EXPECT_EQ (args.indexOf ("--flag1"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("--param1"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("--flag2"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("--param2"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("--flag3"), -1);
+    }
+
+    {
+        CHOC_TEST (ArgcvParsingSingleDash)
+
+        const char* argv[] = { "executableName", "other1", "-flag1", "other2", "-param1", "foo", "-flag2", "-param2", "bar", "-param3", "42", "other3" };
+
+        choc::ArgumentList args (12, argv);
+
+        CHOC_EXPECT_TRUE (args.contains ("-flag1"));
+        CHOC_EXPECT_TRUE (args.contains ("-param1"));
+        CHOC_EXPECT_TRUE (args.contains ("-flag2"));
+        CHOC_EXPECT_TRUE (args.contains ("-param2"));
+        CHOC_EXPECT_TRUE (args.contains ("-param3"));
+        CHOC_EXPECT_FALSE (args.contains ("-flag3"));
+
+        CHOC_EXPECT_EQ (args.indexOf ("other1"), 0);
+        CHOC_EXPECT_EQ (args.indexOf ("-flag1"), 1);
+        CHOC_EXPECT_EQ (args.indexOf ("-param1"), 3);
+        CHOC_EXPECT_EQ (args.indexOf ("-flag2"), 5);
+        CHOC_EXPECT_EQ (args.indexOf ("-param2"), 6);
+        CHOC_EXPECT_EQ (args.indexOf ("-param3"), 8);
+        CHOC_EXPECT_EQ (args.indexOf ("-flag3"), -1);
+
+        CHOC_EXPECT_EQ (args.getValueFor ("-param1", false).value(), "foo");
+        CHOC_EXPECT_EQ (args.getValueFor ("-param2", false).value(), "bar");
+        CHOC_EXPECT_EQ (args.getValueFor ("-param3", false).value(), "42");
+
+        CHOC_EXPECT_TRUE (args.removeIfFound ("-flag1"));
+        CHOC_EXPECT_TRUE (args.removeIfFound ("-param1"));
+
+        CHOC_EXPECT_FALSE (args.getValueFor ("-param1", false).has_value());
+        CHOC_EXPECT_EQ (args.getValueFor ("-param2", false).value(), "bar");
+        CHOC_EXPECT_EQ (args.getValueFor ("-param3", false).value(), "42");
+
+        CHOC_EXPECT_EQ (args.removeValueFor ("-param2", "default"), "bar");
+        CHOC_EXPECT_EQ (args.removeValueFor ("-param2", "default"), "default");
+        CHOC_EXPECT_FALSE (args.removeValueFor ("-param2").has_value());
+        CHOC_EXPECT_FALSE (args.getValueFor ("-param2", false).has_value());
+
+        CHOC_EXPECT_EQ (args.removeIntValue<int> ("-param3", 101), 42);
+        CHOC_EXPECT_EQ (args.removeIntValue<int> ("-param3", 101), 101);
+
+        CHOC_EXPECT_EQ (args.indexOf ("-flag1"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("-param1"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("-flag2"), 3);
+        CHOC_EXPECT_EQ (args.indexOf ("-param2"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("-flag3"), -1);
+
+        args.removeIndex (3);
+
+        CHOC_EXPECT_EQ (args.indexOf ("-flag1"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("-param1"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("-flag2"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("-param2"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("-flag3"), -1);
+    }
+
+
+    {
+        CHOC_TEST (ArgcvParsingMixed)
+
+        const char* argv[] = { "executableName", "other1", "-flag1", "other2", "-param1", "foo", "--flag2", "--param2=bar", "-param3", "42", "other3" };
+
+        choc::ArgumentList args (12, argv);
+
+        CHOC_EXPECT_TRUE (args.contains ("flag1"));
+        CHOC_EXPECT_TRUE (args.contains ("param1"));
+        CHOC_EXPECT_TRUE (args.contains ("flag2"));
+        CHOC_EXPECT_TRUE (args.contains ("param2"));
+        CHOC_EXPECT_TRUE (args.contains ("param3"));
+        CHOC_EXPECT_FALSE (args.contains ("flag3"));
+
+        CHOC_EXPECT_EQ (args.indexOf ("other1"), 0);
+        CHOC_EXPECT_EQ (args.indexOf ("flag1"), 1);
+        CHOC_EXPECT_EQ (args.indexOf ("param1"), 3);
+        CHOC_EXPECT_EQ (args.indexOf ("flag2"), 5);
+        CHOC_EXPECT_EQ (args.indexOf ("param2"), 6);
+        CHOC_EXPECT_EQ (args.indexOf ("param3"), 7);
+        CHOC_EXPECT_EQ (args.indexOf ("flag3"), -1);
+
+        CHOC_EXPECT_EQ (args.getValueFor ("param1", false).value(), "foo");
+        CHOC_EXPECT_EQ (args.getValueFor ("param2", false).value(), "bar");
+        CHOC_EXPECT_EQ (args.getValueFor ("param3", false).value(), "42");
+
+        CHOC_EXPECT_TRUE (args.removeIfFound ("flag1"));
+        CHOC_EXPECT_TRUE (args.removeIfFound ("param1"));
+
+        CHOC_EXPECT_FALSE (args.getValueFor ("param1", false).has_value());
+        CHOC_EXPECT_EQ (args.getValueFor ("param2", false).value(), "bar");
+        CHOC_EXPECT_EQ (args.getValueFor ("param3", false).value(), "42");
+
+        CHOC_EXPECT_EQ (args.removeValueFor ("param2", "default"), "bar");
+        CHOC_EXPECT_EQ (args.removeValueFor ("param2", "default"), "default");
+        CHOC_EXPECT_FALSE (args.removeValueFor ("param2").has_value());
+        CHOC_EXPECT_FALSE (args.getValueFor ("param2", false).has_value());
+
+        CHOC_EXPECT_EQ (args.removeIntValue<int> ("param3", 101), 42);
+        CHOC_EXPECT_EQ (args.removeIntValue<int> ("param3", 101), 101);
+
+        CHOC_EXPECT_EQ (args.indexOf ("flag1"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("param1"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("flag2"), 3);
+        CHOC_EXPECT_EQ (args.indexOf ("param2"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("flag3"), -1);
+
+        args.removeIndex (3);
+
+        CHOC_EXPECT_EQ (args.indexOf ("flag1"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("param1"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("flag2"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("param2"), -1);
+        CHOC_EXPECT_EQ (args.indexOf ("flag3"), -1);
+    }
+
+    {
+        CHOC_TEST (ArgcvParsingStringArgs)
+
+        choc::ArgumentList args (choc::text::splitAtWhitespace ("-flag1 --flag2 --param1=foo other stuff"));
+
+        CHOC_EXPECT_TRUE (args.contains ("flag1"));
+        CHOC_EXPECT_EQ (args.removeValueFor ("param1", "default"), "foo");
+    }
+}
+
+//==============================================================================
 inline void testAudioBuffers (choc::test::TestProgress& progress)
 {
     CHOC_CATEGORY (AudioBuffers);
@@ -2149,6 +2379,149 @@ inline void testFIFOs (choc::test::TestProgress& progress)
                 CHOC_EXPECT_EQ (retrievedBytes, messageSize * 3);
             }
         }
+    }
+}
+
+//==============================================================================
+inline void testAudioMIDIBlockDispatcher (choc::test::TestProgress& progress)
+{
+    CHOC_CATEGORY (AudioMIDIBlockDispatcher);
+
+    using Dispatcher = choc::audio::AudioMIDIBlockDispatcher;
+
+    // midiTimingGranularityFrames is a *minimum* chunk size, not a snap-to-grid: events are
+    // rendered at their exact frame positions whenever possible, and the granularity only comes
+    // into play when placing an event exactly would create a chunk smaller than the granularity -
+    // in which case the event is grouped into (rendered at the start of) the current chunk.
+    //
+    // To place events at exact frames we provide our own clock via dispatcher.getCurrentTime.
+    // Running at 1 Hz makes one second equal one frame, so a timestamp N seconds past the epoch
+    // lands at frame N.
+    auto renderBlock = [] (const std::vector<int32_t>& eventFrames, uint32_t granularity,
+                           std::vector<uint32_t>& blockSizes, std::vector<size_t>& midiCounts)
+    {
+        constexpr uint32_t blockSize = 256;
+        choc::buffer::ChannelArrayBuffer<float> inputBuffer (1, blockSize), outputBuffer (1, blockSize);
+
+        Dispatcher dispatcher;
+        dispatcher.reset (1.0);
+        dispatcher.midiTimingGranularityFrames = granularity;
+        dispatcher.setAudioBuffers (inputBuffer, outputBuffer);
+
+        Dispatcher::MIDIEventTime now = {};
+        dispatcher.getCurrentTime = [&now] { return now; };
+
+        auto frameToTime = [] (int32_t frame) { return Dispatcher::MIDIEventTime() + std::chrono::seconds (frame); };
+
+        // Prime the dispatcher at the start of the simulated block.
+        now = frameToTime (0);
+        dispatcher.processInChunks ([] (const Dispatcher::Block&) {});
+
+        for (auto frame : eventFrames)
+        {
+            now = frameToTime (frame);
+            dispatcher.addMIDIEvent (nullptr, choc::midi::noteOn (1, 60, 100));
+        }
+
+        now = frameToTime (static_cast<int32_t> (blockSize));
+
+        blockSizes.clear();
+        midiCounts.clear();
+        dispatcher.processInChunks ([&] (const Dispatcher::Block& block)
+        {
+            blockSizes.push_back (block.audioOutput.getNumFrames());
+            midiCounts.push_back (block.midiMessages.size());
+        });
+    };
+
+    std::vector<uint32_t> blockSizes;
+    std::vector<size_t> midiCounts;
+
+    {
+        CHOC_TEST (ExactPositionWhenFarEnoughApart)
+
+        // 123 is >= the granularity from the start and 133 frames remain after it, so the
+        // event renders at its exact position: blocks of 123 / 133.
+        renderBlock ({ 123 }, 32, blockSizes, midiCounts);
+
+        CHOC_EXPECT_EQ (blockSizes.size(), 2u);
+        CHOC_EXPECT_EQ (blockSizes[0], 123u);
+        CHOC_EXPECT_EQ (blockSizes[1], 133u);
+        CHOC_EXPECT_EQ (midiCounts[0], 0u);
+        CHOC_EXPECT_EQ (midiCounts[1], 1u);
+    }
+
+    {
+        CHOC_TEST (EventsCloserThanGranularityShareAChunk)
+
+        // 123 and 130 are only 7 frames apart (< 32), so splitting between them would make a
+        // 7-frame chunk. Instead 130 is grouped with 123: both land at the start of block 2.
+        renderBlock ({ 123, 130 }, 32, blockSizes, midiCounts);
+
+        CHOC_EXPECT_EQ (blockSizes.size(), 2u);
+        CHOC_EXPECT_EQ (blockSizes[0], 123u);
+        CHOC_EXPECT_EQ (blockSizes[1], 133u);
+        CHOC_EXPECT_EQ (midiCounts[0], 0u);
+        CHOC_EXPECT_EQ (midiCounts[1], 2u);
+    }
+
+    {
+        CHOC_TEST (EventWithinGranularityOfStartRendersAtZero)
+
+        // 20 < 32 from the block start, so an exact split would create a sub-granularity chunk.
+        // The event is grouped into a single full-size block.
+        renderBlock ({ 20 }, 32, blockSizes, midiCounts);
+
+        CHOC_EXPECT_EQ (blockSizes.size(), 1u);
+        CHOC_EXPECT_EQ (blockSizes[0], 256u);
+        CHOC_EXPECT_EQ (midiCounts[0], 1u);
+    }
+
+    {
+        CHOC_TEST (EventsSpacedAtGranularitySplitExactly)
+
+        // 40, 80, 120 are each >= 32 apart, so every event renders exactly: 40 / 40 / 40 / 136.
+        renderBlock ({ 40, 80, 120 }, 32, blockSizes, midiCounts);
+
+        CHOC_EXPECT_EQ (blockSizes.size(), 4u);
+        CHOC_EXPECT_EQ (blockSizes[0], 40u);
+        CHOC_EXPECT_EQ (blockSizes[1], 40u);
+        CHOC_EXPECT_EQ (blockSizes[2], 40u);
+        CHOC_EXPECT_EQ (blockSizes[3], 136u);
+        CHOC_EXPECT_EQ (midiCounts[0], 0u);
+        CHOC_EXPECT_EQ (midiCounts[1], 1u);
+        CHOC_EXPECT_EQ (midiCounts[2], 1u);
+        CHOC_EXPECT_EQ (midiCounts[3], 1u);
+    }
+
+    {
+        CHOC_TEST (ShortTrailingChunkIsAllowed)
+
+        // An event near the end still earns its own boundary even though the remaining chunk
+        // (6 frames) is shorter than the granularity - the buffer end is a natural boundary,
+        // so a short final chunk is acceptable.
+        renderBlock ({ 250 }, 32, blockSizes, midiCounts);
+
+        CHOC_EXPECT_EQ (blockSizes.size(), 2u);
+        CHOC_EXPECT_EQ (blockSizes[0], 250u);
+        CHOC_EXPECT_EQ (blockSizes[1], 6u);
+        CHOC_EXPECT_EQ (midiCounts[0], 0u);
+        CHOC_EXPECT_EQ (midiCounts[1], 1u);
+    }
+
+    {
+        CHOC_TEST (EventOnBlockBoundaryIsClampedNotDropped)
+
+        // An event timestamped at exactly the block boundary (frame 256 of a 256-frame block)
+        // must be clamped back to the last valid frame (255) and delivered, not dropped. This
+        // is the boundary case of the general clamp that already handles later timestamps.
+        renderBlock ({ 256 }, 32, blockSizes, midiCounts);
+
+        CHOC_EXPECT_EQ (blockSizes.size(), 2u);
+        CHOC_EXPECT_EQ (blockSizes[0], 255u);
+        CHOC_EXPECT_EQ (blockSizes[1], 1u);
+        CHOC_EXPECT_EQ (midiCounts[0], 0u);
+        CHOC_EXPECT_EQ (midiCounts[1], 1u);
     }
 }
 
@@ -3225,6 +3598,30 @@ static std::string createRandomData (size_t length)
     return out.str().substr (0, length);
 }
 
+// Creates a sequence of 4-byte words picked at random from a small vocabulary. This
+// compresses into lots of short matches with scattered distances, so each deflate
+// block produces far more output than fits in the deflater's output buffer.
+static std::string createShortMatchData (size_t length)
+{
+    uint32_t seed = 12345;
+    auto next = [&] { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+
+    std::vector<std::string> words (256);
+
+    for (auto& w : words)
+        for (int i = 0; i < 4; ++i)
+            w += static_cast<char> (next() & 0xff);
+
+    std::string result;
+    result.reserve (length + 4);
+
+    while (result.size() < length)
+        result += words[next() % words.size()];
+
+    result.resize (length);
+    return result;
+}
+
 static void testZLIB (choc::test::TestProgress& progress)
 {
     CHOC_CATEGORY (zlib);
@@ -3413,6 +3810,33 @@ static void testZLIB (choc::test::TestProgress& progress)
         performSeekTest (1, choc::zlib::DeflaterStream::CompressionLevel::fastest);
         performSeekTest (100, choc::zlib::DeflaterStream::CompressionLevel::medium);
         performSeekTest (128 * 1024, choc::zlib::DeflaterStream::CompressionLevel::best);
+    }
+
+    {
+        CHOC_TEST (LargeSingleWrite)
+
+        // A large amount of data passed in one write() call, which produces more
+        // compressed output than fits in the deflater's output buffer
+        const auto original = createShortMatchData (200000);
+
+        for (auto compression = choc::zlib::DeflaterStream::CompressionLevel::none;
+             compression <= choc::zlib::DeflaterStream::CompressionLevel::best;
+             compression = (choc::zlib::DeflaterStream::CompressionLevel) (compression + 1))
+        {
+            auto out = std::make_shared<std::ostringstream> (std::ios::binary);
+
+            {
+                choc::zlib::DeflaterStream deflater (out, compression, 15);
+                deflater.write (original.data(), static_cast<std::streamsize> (original.size()));
+            }
+
+            choc::zlib::InflaterStream in (std::make_shared<std::istringstream> (out->str(), std::ios::binary),
+                                           choc::zlib::InflaterStream::FormatType::zlib);
+
+            std::string result ((std::istreambuf_iterator<char> (in)), std::istreambuf_iterator<char>());
+            CHOC_EXPECT_EQ (result.size(), original.size());
+            CHOC_EXPECT_TRUE (result == original);
+        }
     }
 }
 
@@ -3913,6 +4337,110 @@ static void testZipFile (choc::test::TestProgress& progress)
         }
         CHOC_CATCH_UNEXPECTED_EXCEPTION
     }
+
+    {
+        CHOC_TEST (ZipWriter_LargeFile)
+
+        try
+        {
+            const auto original = createShortMatchData (200000);
+            auto stream = std::make_shared<std::ostringstream> (std::ios::binary);
+
+            {
+                choc::zip::ZipWriter writer (stream);
+                writer.addFile ("audio.raw", original);
+            }
+
+            auto readStream = std::make_shared<std::istringstream> (stream->str(), std::ios::binary);
+            choc::zip::ZipFile zipFile (readStream);
+
+            CHOC_EXPECT_EQ (zipFile.items.size(), 1u);
+            CHOC_EXPECT_EQ (zipFile.items[0].uncompressedSize, original.size());
+
+            auto reader = zipFile.items[0].createReader();
+            std::string content;
+            content.resize (original.size());
+            reader->read (content.data(), static_cast<std::streamsize> (content.size()));
+            CHOC_EXPECT_EQ (reader->gcount(), static_cast<std::streamsize> (original.size()));
+            CHOC_EXPECT_TRUE (content == original);
+        }
+        CHOC_CATCH_UNEXPECTED_EXCEPTION
+    }
+
+    {
+        CHOC_TEST (ZipFile_StoredEntryIterator)
+
+        try
+        {
+            auto stream = std::make_shared<std::ostringstream> (std::ios::binary);
+
+            {
+                choc::zip::ZipWriter writer (stream);
+                writer.addFile ("stored.txt", "Hello, stored world!", choc::zip::ZipWriter::CompressionLevel::uncompressed);
+                writer.addFile ("deflated.txt", "Hello, deflated world!", choc::zip::ZipWriter::CompressionLevel::best);
+            }
+
+            auto readStream = std::make_shared<std::istringstream> (stream->str(), std::ios::binary);
+            choc::zip::ZipFile zipFile (readStream);
+
+            CHOC_EXPECT_EQ (zipFile.items.size(), 2u);
+
+            auto readAllWithIterator = [] (const choc::zip::ZipFile::Item& item)
+            {
+                auto reader = item.createReader();
+                return std::string ((std::istreambuf_iterator<char> (*reader)), std::istreambuf_iterator<char>());
+            };
+
+            CHOC_EXPECT_EQ (readAllWithIterator (zipFile.items[0]), "Hello, stored world!");
+            CHOC_EXPECT_EQ (readAllWithIterator (zipFile.items[1]), "Hello, deflated world!");
+
+            // Mixing single-character and bulk reads on a stored entry
+            auto reader = zipFile.items[0].createReader();
+            CHOC_EXPECT_EQ (reader->get(), 'H');
+            CHOC_EXPECT_EQ (reader->peek(), 'e');
+            std::string rest (19, ' ');
+            reader->read (rest.data(), 19);
+            CHOC_EXPECT_EQ (rest, "ello, stored world!");
+            CHOC_EXPECT_EQ (reader->get(), std::char_traits<char>::eof());
+        }
+        CHOC_CATCH_UNEXPECTED_EXCEPTION
+    }
+
+    {
+        CHOC_TEST (ZipFile_StoredEntrySeek)
+
+        try
+        {
+            auto stream = std::make_shared<std::ostringstream> (std::ios::binary);
+
+            {
+                choc::zip::ZipWriter writer (stream);
+                writer.addFile ("stored.txt", "Hello, stored world!", choc::zip::ZipWriter::CompressionLevel::uncompressed);
+            }
+
+            auto readStream = std::make_shared<std::istringstream> (stream->str(), std::ios::binary);
+            choc::zip::ZipFile zipFile (readStream);
+            auto reader = zipFile.items[0].createReader();
+
+            reader->seekg (0, std::ios_base::end);
+            CHOC_EXPECT_EQ (reader->tellg(), 20);
+
+            reader->seekg (-6, std::ios_base::end);
+            CHOC_EXPECT_EQ (reader->tellg(), 14);
+            std::string tail (6, ' ');
+            reader->read (tail.data(), 6);
+            CHOC_EXPECT_EQ (tail, "world!");
+
+            // Position must stay correct after single-character reads
+            reader->seekg (0, std::ios_base::beg);
+            CHOC_EXPECT_EQ (reader->get(), 'H');
+            CHOC_EXPECT_EQ (reader->tellg(), 1);
+            reader->seekg (6, std::ios_base::cur);
+            CHOC_EXPECT_EQ (reader->tellg(), 7);
+            CHOC_EXPECT_EQ (reader->get(), 's');
+        }
+        CHOC_CATCH_UNEXPECTED_EXCEPTION
+    }
 }
 
 
@@ -4135,6 +4663,7 @@ inline bool runAllTests (choc::test::TestProgress& progress, bool multithread)
 
     std::function<void(choc::test::TestProgress&)> testFunctions[] =
     {
+        testArgumentList,
         testExecute,
         testHTTPServer,
         testZLIB,
@@ -4151,6 +4680,7 @@ inline bool runAllTests (choc::test::TestProgress& progress, bool multithread)
         testIntToFloat,
         testFIFOs,
         testMIDIFiles,
+        testAudioMIDIBlockDispatcher,
         testJavascript,
         testWebview,
         testCOM,
