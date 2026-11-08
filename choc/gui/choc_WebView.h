@@ -1787,7 +1787,10 @@ private:
 
         EventRegistrationToken token;
         coreWebView->add_WebResourceRequested (eventHandler, std::addressof (token));
-        coreWebView->add_NavigationCompleted (eventHandler, std::addressof (token));
+        // add_NavigationCompleted takes a void*, so the pointer must be explicitly adjusted to the
+        // handler sub-object: passing eventHandler directly would hand WebView2 the first base
+        // (the environment-completed handler) and the wrong Invoke() would be called.
+        coreWebView->add_NavigationCompleted (static_cast<ICoreWebView2NavigationCompletedEventHandler*> (eventHandler), std::addressof (token));
 
         if (options.fetchResource)
             navigate ({});
